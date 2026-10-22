@@ -283,7 +283,7 @@ async def create_api_key(request: CreateApiKeyRequest):
     raw_key, digest = generate_client_key()
     try:
         key_id = await repository.create_client_key(
-            request.client_id, request.display_name, raw_key, digest
+            request.client_id, request.display_name, digest
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

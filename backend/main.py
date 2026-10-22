@@ -57,13 +57,17 @@ async def usage_audit_middleware(request: Request, call_next):
     response = await call_next(request)
     client_id = getattr(request.state, "client_id", None)
     key_id = getattr(request.state, "api_key_id", None)
+    usage_event_id = getattr(request.state, "usage_event_id", 0)
     if client_id:
         route = getattr(request.scope.get("route"), "path", request.url.path)
+        duration_ms = int((time.monotonic() - started) * 1000)
         try:
-            await repository.record_usage(
-                client_id, key_id, request.method, route,
-                response.status_code, int((time.monotonic() - started) * 1000),
-            )
+            if usage_event_id:
+                await repository.complete_usage(usage_event_id, response.status_code, duration_ms)
+            else:
+                await repository.record_usage(
+                    client_id, key_id, request.method, route, response.status_code, duration_ms,
+                )
         except Exception:
             logger.warning("Unable to persist API usage event")
     return response

@@ -4,30 +4,89 @@ import ChatInterface from './components/ChatInterface';
 import { api } from './api';
 import './App.css';
 
+function ApiKeyGate({ onSubmit }) {
+  const [key, setKey] = useState('');
+
+  return (
+    <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (key.trim()) onSubmit(key.trim());
+        }}
+        style={{
+          width: 'min(100%, 460px)',
+          display: 'grid',
+          gap: 16,
+          padding: 28,
+          border: '1px solid var(--border-color, #343b49)',
+          borderRadius: 16,
+          background: 'var(--panel-bg, #171b24)',
+          color: 'var(--text-color, #f5f7fb)',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: '0 0 8px' }}>Nexus AI API</h1>
+          <p style={{ margin: 0, opacity: 0.78 }}>
+            Insira a chave de um cliente autorizado para acessar suas conversas.
+          </p>
+        </div>
+        <label htmlFor="nexus-api-key">Chave de API</label>
+        <input
+          id="nexus-api-key"
+          type="password"
+          autoComplete="current-password"
+          value={key}
+          onChange={(event) => setKey(event.target.value)}
+          placeholder="Cole sua chave de cliente"
+          required
+          style={{
+            width: '100%',
+            boxSizing: 'border-box',
+            padding: '12px 14px',
+            borderRadius: 8,
+            border: '1px solid var(--border-color, #343b49)',
+            background: 'var(--input-bg, #10141b)',
+            color: 'inherit',
+          }}
+        />
+        <button type="submit" style={{ padding: '12px 16px', borderRadius: 8, cursor: 'pointer' }}>
+          Conectar
+        </button>
+        <small style={{ opacity: 0.68 }}>
+          A chave fica apenas nesta sessão do navegador. Nunca use aqui a chave mestre do OpenRouter.
+        </small>
+      </form>
+    </main>
+  );
+}
+
 function App() {
+  const [apiKey, setApiKey] = useState(() => api.getApiKey());
   const [conversations, setConversations] = useState([]);
   const [currentConversationId, setCurrentConversationId] = useState(null);
   const [currentConversation, setCurrentConversation] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Load conversations on mount
   useEffect(() => {
-    loadConversations();
-  }, []);
+    if (apiKey) loadConversations();
+  }, [apiKey]);
 
-  // Load conversation details when selected
   useEffect(() => {
-    if (currentConversationId) {
-      loadConversation(currentConversationId);
-    }
-  }, [currentConversationId]);
+    if (currentConversationId && apiKey) loadConversation(currentConversationId);
+  }, [currentConversationId, apiKey]);
+
+  const handleApiKeySubmit = (key) => {
+    api.setApiKey(key);
+    setApiKey(key);
+  };
 
   const loadConversations = async () => {
     try {
       const convs = await api.listConversations();
       setConversations(convs);
     } catch (error) {
-      console.error('Failed to load conversations:', error);
+      console.error('Failed to load conversations:', error.message);
     }
   };
 
@@ -36,150 +95,95 @@ function App() {
       const conv = await api.getConversation(id);
       setCurrentConversation(conv);
     } catch (error) {
-      console.error('Failed to load conversation:', error);
+      console.error('Failed to load conversation:', error.message);
     }
   };
 
   const handleNewConversation = async () => {
     try {
       const newConv = await api.createConversation();
-      setConversations([
-        { id: newConv.id, created_at: newConv.created_at, message_count: 0 },
-        ...conversations,
+      setConversations((previous) => [
+        { id: newConv.id, created_at: newConv.created_at, title: newConv.title, message_count: 0 },
+        ...previous,
       ]);
       setCurrentConversationId(newConv.id);
+      setCurrentConversation(newConv);
     } catch (error) {
-      console.error('Failed to create conversation:', error);
+      console.error('Failed to create conversation:', error.message);
     }
   };
 
-  const handleSelectConversation = (id) => {
-    setCurrentConversationId(id);
-  };
+  const handleSelectConversation = (id) => setCurrentConversationId(id);
 
   const handleSendMessage = async (content) => {
-    if (!currentConversationId) return;
-
+    if (!currentConversationId || !currentConversation) return;
     setIsLoading(true);
     try {
-      // Optimistically add user message to UI
       const userMessage = { role: 'user', content };
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: [...prev.messages, userMessage],
-      }));
-
-      // Create a partial assistant message that will be updated progressively
       const assistantMessage = {
         role: 'assistant',
         stage1: null,
         stage2: null,
         stage3: null,
         metadata: null,
-        loading: {
-          stage1: false,
-          stage2: false,
-          stage3: false,
-        },
+        loading: { stage1: false, stage2: false, stage3: false },
       };
-
-      // Add the partial assistant message
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: [...prev.messages, assistantMessage],
+      setCurrentConversation((previous) => ({
+        ...previous,
+        messages: [...previous.messages, userMessage, assistantMessage],
       }));
 
-      // Send message with streaming
       await api.sendMessageStream(currentConversationId, content, (eventType, event) => {
-        switch (eventType) {
-          case 'stage1_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage1 = true;
-              return { ...prev, messages };
-            });
-            break;
+        setCurrentConversation((previous) => {
+          if (!previous || !previous.messages.length) return previous;
+          const messages = [...previous.messages];
+          const lastIndex = messages.length - 1;
+          const lastMessage = { ...messages[lastIndex] };
+          lastMessage.loading = { ...(lastMessage.loading || {}) };
+          switch (eventType) {
+            case 'stage1_start':
+              lastMessage.loading.stage1 = true;
+              break;
+            case 'stage1_complete':
+              lastMessage.stage1 = event.data;
+              lastMessage.loading.stage1 = false;
+              break;
+            case 'stage2_start':
+              lastMessage.loading.stage2 = true;
+              break;
+            case 'stage2_complete':
+              lastMessage.stage2 = event.data;
+              lastMessage.metadata = event.metadata;
+              lastMessage.loading.stage2 = false;
+              break;
+            case 'stage3_start':
+              lastMessage.loading.stage3 = true;
+              break;
+            case 'stage3_complete':
+              lastMessage.stage3 = event.data;
+              lastMessage.loading.stage3 = false;
+              break;
+            default:
+              break;
+          }
+          messages[lastIndex] = lastMessage;
+          return { ...previous, messages };
+        });
 
-          case 'stage1_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage1 = event.data;
-              lastMsg.loading.stage1 = false;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage2_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage2 = true;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage2_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage2 = event.data;
-              lastMsg.metadata = event.metadata;
-              lastMsg.loading.stage2 = false;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage3_start':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.loading.stage3 = true;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'stage3_complete':
-            setCurrentConversation((prev) => {
-              const messages = [...prev.messages];
-              const lastMsg = messages[messages.length - 1];
-              lastMsg.stage3 = event.data;
-              lastMsg.loading.stage3 = false;
-              return { ...prev, messages };
-            });
-            break;
-
-          case 'title_complete':
-            // Reload conversations to get updated title
-            loadConversations();
-            break;
-
-          case 'complete':
-            // Stream complete, reload conversations list
-            loadConversations();
-            setIsLoading(false);
-            break;
-
-          case 'error':
-            console.error('Stream error:', event.message);
-            setIsLoading(false);
-            break;
-
-          default:
-            console.log('Unknown event type:', eventType);
-        }
+        if (eventType === 'title_complete' || eventType === 'complete') loadConversations();
+        if (eventType === 'complete' || eventType === 'error') setIsLoading(false);
+        if (eventType === 'error') console.error('Council request failed:', event.message);
       });
     } catch (error) {
-      console.error('Failed to send message:', error);
-      // Remove optimistic messages on error
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: prev.messages.slice(0, -2),
-      }));
+      console.error('Failed to send message:', error.message);
+      setCurrentConversation((previous) => previous
+        ? { ...previous, messages: previous.messages.slice(0, -2) }
+        : previous);
       setIsLoading(false);
     }
   };
+
+  if (!apiKey) return <ApiKeyGate onSubmit={handleApiKeySubmit} />;
 
   return (
     <div className="app">

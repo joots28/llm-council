@@ -2,16 +2,19 @@
 
 import asyncio
 import json
+import logging
+import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import storage
+from . import database, repository
 from .config import CHAIRMAN_MODEL, COUNCIL_MODELS, CORS_ALLOWED_ORIGINS, MAX_REQUEST_CHARS
 from .council import (
     calculate_aggregate_rankings,
@@ -23,13 +26,48 @@ from .council import (
 )
 from .openrouter import query_model
 from .schemas.chat import ChatCompletionRequest
-from .security.api_keys import ApiClient, authenticate_api_key
+from .security.api_keys import (
+    ApiClient, authenticate_api_key, generate_client_key, require_admin_token,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize configured durable storage and release the connection pool."""
+    await database.connect()
+    try:
+        yield
+    finally:
+        await database.close()
+
 
 app = FastAPI(
     title="Nexus AI API",
     version="1.0.0",
     description="Private, authenticated API for the multi-model LLM Council.",
+    lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def usage_audit_middleware(request: Request, call_next):
+    started = time.monotonic()
+    response = await call_next(request)
+    client_id = getattr(request.state, "client_id", None)
+    key_id = getattr(request.state, "api_key_id", None)
+    if client_id:
+        route = getattr(request.scope.get("route"), "path", request.url.path)
+        try:
+            await repository.record_usage(
+                client_id, key_id, request.method, route,
+                response.status_code, int((time.monotonic() - started) * 1000),
+            )
+        except Exception:
+            logger.warning("Unable to persist API usage event")
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ALLOWED_ORIGINS,
@@ -45,6 +83,18 @@ class CreateConversationRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=MAX_REQUEST_CHARS)
+
+
+class CreateApiKeyRequest(BaseModel):
+    client_id: str = Field(min_length=2, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+    display_name: str = Field(default="", max_length=120)
+
+
+class CreatedApiKey(BaseModel):
+    key_id: str
+    client_id: str
+    api_key: str
+    warning: str = "This key is shown once. Store it securely."
 
 
 class ConversationMetadata(BaseModel):
@@ -70,10 +120,12 @@ def _validate_prompt(prompt: str) -> str:
     return prompt
 
 
-def _get_owned_conversation(conversation_id: str, client_id: str):
+async def _get_owned_conversation(conversation_id: str, client_id: str):
     try:
-        return storage.get_conversation(conversation_id, client_id)
-    except ValueError:
+        return await repository.get_conversation(conversation_id, client_id)
+    except (ValueError, Exception) as exc:
+        # Invalid UUIDs and missing/foreign conversations are deliberately indistinguishable.
+        logger.debug("Conversation lookup did not succeed (%s)", type(exc).__name__)
         return None
 
 
@@ -220,10 +272,45 @@ async def council_completions_stream(
     )
 
 
+@app.post("/v1/admin/keys", response_model=CreatedApiKey, dependencies=[Depends(require_admin_token)])
+async def create_api_key(request: CreateApiKeyRequest):
+    """Create a client key. The raw secret is returned once and never stored."""
+    raw_key, digest = generate_client_key()
+    try:
+        key_id = await repository.create_client_key(
+            request.client_id, request.display_name, raw_key, digest
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return CreatedApiKey(key_id=key_id, client_id=request.client_id, api_key=raw_key)
+
+
+@app.delete("/v1/admin/keys/{key_id}", dependencies=[Depends(require_admin_token)])
+async def revoke_api_key(key_id: str):
+    """Revoke a database-backed key immediately."""
+    try:
+        revoked = await repository.revoke_client_key(key_id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid key id or database configuration") from exc
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Active API key not found")
+    return {"status": "revoked", "key_id": key_id}
+
+
+@app.get("/v1/usage/me")
+async def get_my_usage(
+    days: int = 30,
+    client: ApiClient = Depends(authenticate_api_key),
+):
+    if not database.enabled():
+        raise HTTPException(status_code=503, detail="Usage reporting requires DATABASE_URL")
+    return await repository.usage_summary(client.client_id, days)
+
+
 # Legacy UI endpoints remain available but are now authenticated and client-scoped.
 @app.get("/api/conversations", response_model=List[ConversationMetadata])
 async def list_conversations(client: ApiClient = Depends(authenticate_api_key)):
-    return storage.list_conversations(client.client_id)
+    return await repository.list_conversations(client.client_id)
 
 
 @app.post("/api/conversations", response_model=Conversation)
@@ -233,7 +320,7 @@ async def create_conversation(
 ):
     del request
     conversation_id = str(uuid.uuid4())
-    return storage.create_conversation(conversation_id, client.client_id)
+    return await repository.create_conversation(conversation_id, client.client_id)
 
 
 @app.get("/api/conversations/{conversation_id}", response_model=Conversation)
@@ -241,10 +328,7 @@ async def get_conversation(
     conversation_id: str,
     client: ApiClient = Depends(authenticate_api_key),
 ):
-    try:
-        conversation = storage.get_conversation(conversation_id, client.client_id)
-    except ValueError:
-        conversation = None
+    conversation = await _get_owned_conversation(conversation_id, client.client_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
@@ -256,17 +340,17 @@ async def send_message(
     request: SendMessageRequest,
     client: ApiClient = Depends(authenticate_api_key),
 ):
-    conversation = _get_owned_conversation(conversation_id, client.client_id)
+    conversation = await _get_owned_conversation(conversation_id, client.client_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     prompt = _validate_prompt(request.content)
     is_first_message = len(conversation["messages"]) == 0
-    storage.add_user_message(conversation_id, prompt, client.client_id)
+    await repository.add_user_message(conversation_id, prompt, client.client_id)
     if is_first_message:
         title = await generate_conversation_title(prompt)
-        storage.update_conversation_title(conversation_id, title, client.client_id)
+        await repository.update_conversation_title(conversation_id, title, client.client_id)
     stage1, stage2, stage3, metadata = await run_full_council(prompt)
-    storage.add_assistant_message(conversation_id, stage1, stage2, stage3, client.client_id)
+    await repository.add_assistant_message(conversation_id, stage1, stage2, stage3, client.client_id)
     return {"stage1": stage1, "stage2": stage2, "stage3": stage3, "metadata": metadata}
 
 
@@ -285,7 +369,7 @@ async def send_message_stream(
     async def event_generator():
         title_task = None
         try:
-            storage.add_user_message(conversation_id, prompt, client.client_id)
+            await repository.add_user_message(conversation_id, prompt, client.client_id)
             if is_first_message:
                 title_task = asyncio.create_task(generate_conversation_title(prompt))
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
@@ -304,9 +388,9 @@ async def send_message_stream(
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3})}\n\n"
             if title_task:
                 title = await title_task
-                storage.update_conversation_title(conversation_id, title, client.client_id)
+                await repository.update_conversation_title(conversation_id, title, client.client_id)
                 yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
-            storage.add_assistant_message(conversation_id, stage1, stage2, stage3, client.client_id)
+            await repository.add_assistant_message(conversation_id, stage1, stage2, stage3, client.client_id)
             yield f"data: {json.dumps({'type': 'complete'})}\n\n"
         except asyncio.CancelledError:
             if title_task and not title_task.done():

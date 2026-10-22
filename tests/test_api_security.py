@@ -16,6 +16,7 @@ from backend.security import api_keys
 class PrivateApiSecurityTests(unittest.TestCase):
     def setUp(self):
         api_keys._rate_buckets.clear()
+        api_keys._daily_buckets.clear()
         self.raw_key = "test-client-key-not-for-production"
         digest = hashlib.sha256(self.raw_key.encode("utf-8")).hexdigest()
         self.env = patch.dict(os.environ, {

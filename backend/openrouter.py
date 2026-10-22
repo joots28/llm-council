@@ -1,6 +1,8 @@
 """OpenRouter HTTP client. Provider-specific behavior stays behind the adapter."""
 
+import asyncio
 import logging
+import os
 from typing import List, Dict, Any, Optional
 
 import httpx
@@ -8,6 +10,8 @@ import httpx
 from .config import OPENROUTER_API_KEY, OPENROUTER_API_URL
 
 logger = logging.getLogger(__name__)
+_PROVIDER_CONCURRENCY = max(1, int(os.getenv("MAX_CONCURRENT_PROVIDER_CALLS", "8")))
+_provider_semaphore = asyncio.Semaphore(_PROVIDER_CONCURRENCY)
 
 
 async def query_model(
@@ -27,19 +31,20 @@ async def query_model(
     payload = {"model": model, "messages": messages}
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            choices = data.get("choices") or []
-            if not choices or not isinstance(choices[0], dict):
-                logger.warning("Provider returned an empty completion for model %s", model)
-                return None
-            message = choices[0].get("message") or {}
-            return {
-                "content": message.get("content"),
-                "reasoning_details": message.get("reasoning_details"),
-            }
+        async with _provider_semaphore:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                choices = data.get("choices") or []
+                if not choices or not isinstance(choices[0], dict):
+                    logger.warning("Provider returned an empty completion for model %s", model)
+                    return None
+                message = choices[0].get("message") or {}
+                return {
+                    "content": message.get("content"),
+                    "reasoning_details": message.get("reasoning_details"),
+                }
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
         # Avoid logging raw provider exceptions or payloads that could contain sensitive data.
         logger.warning("OpenRouter request failed for model %s", model)

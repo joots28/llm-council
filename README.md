@@ -2,7 +2,7 @@
 
 A private, authenticated API around the original three-stage LLM Council. It keeps the existing React + Vite interface and FastAPI backend, while introducing a versioned API contract and a provider adapter for OpenRouter.
 
-> **Development status:** this branch is an implementation in progress. It has not been deployed. JSON conversation storage remains a local-development implementation; PostgreSQL migrations, persistent client administration, rate limiting/quotas, and a full deployment validation are still pending. Do not expose this branch to the public internet until those items are completed and tested.
+> **Development status:** this branch has passed the backend unit/security tests, PostgreSQL integration tests, and frontend build in GitHub Actions. It has not been deployed. PostgreSQL persistence, key lifecycle, usage auditing, quotas, and basic rate limits are implemented. Production rollout still requires real-environment configuration, secret management, operational monitoring, shared rate limiting for multi-instance deployments, and a deliberate migration plan for existing JSON conversations. Do not expose the API until those environment-specific checks are complete.
 
 ## How the Council works
 
@@ -134,7 +134,7 @@ Run the security regression suite after installing project dependencies:
 uv run python -m unittest discover -s tests -v
 ```
 
-The tests cover missing/valid API keys, protection of legacy routes, conversation ownership, and conversation ID path traversal. The test suite is run by the GitHub Actions workflow. PostgreSQL integration tests still require a dedicated test database and are not yet part of the default CI job.
+The GitHub Actions workflow runs authentication and security regression tests, PostgreSQL integration tests against an ephemeral PostgreSQL 16 service, and the React/Vite production build. The PostgreSQL tests cover key lookup/revocation, durable client-scoped conversations, usage aggregation, and atomic quota reservations.
 
 ## Security and production readiness
 

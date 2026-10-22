@@ -151,6 +151,10 @@ async def council_completions(
 ):
     """Return all three Council stages and their aggregate metadata."""
     del client
+    if request.model != "nexus-council":
+        raise HTTPException(status_code=400, detail="Use model 'nexus-council' for Council completions")
+    if request.stream:
+        raise HTTPException(status_code=400, detail="Use /v1/council/completions/stream for streaming")
     prompt = _combine_messages(request.messages)
     stage1, stage2, stage3, metadata = await run_full_council(prompt)
     if not stage1 or not stage3.get("response"):
@@ -173,6 +177,8 @@ async def council_completions_stream(
 ):
     """Stream Council stage events using Server-Sent Events."""
     del client
+    if request.model != "nexus-council":
+        raise HTTPException(status_code=400, detail="Use model 'nexus-council' for Council streaming")
     prompt = _combine_messages(request.messages)
 
     async def event_generator():

@@ -25,6 +25,9 @@ class PostgresRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await conn.execute("DELETE FROM nexus_conversations WHERE client_id=$1", self.client_id)
             await conn.execute("DELETE FROM nexus_api_keys WHERE client_id=$1", self.client_id)
             await conn.execute("DELETE FROM nexus_api_clients WHERE client_id=$1", self.client_id)
+        # IsolatedAsyncioTestCase creates a fresh event loop for each test. Closing
+        # the pool prevents asyncpg connections from leaking across those loops.
+        await database.close()
 
     async def test_key_hash_lookup_and_revocation(self):
         found = await repository.find_active_key(self.digest)

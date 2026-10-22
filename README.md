@@ -21,6 +21,9 @@ A private, authenticated API around the original three-stage LLM Council. It kee
 - Provider adapter boundary, with OpenRouter as the initial provider.
 - Frontend API base URL configuration, a session-only API-key entry screen, and an SSE frame parser that handles split network chunks.
 - Automated security regression tests.
+- Optional PostgreSQL persistence for conversations, client keys, and request-usage audit.
+- Admin-only key creation/revocation endpoints; raw client keys are returned once.
+- Per-client in-process rolling rate limit and authenticated usage summary endpoint.
 
 ## API endpoints
 
@@ -33,6 +36,9 @@ All endpoints below require `Authorization: Bearer YOUR_CLIENT_KEY`, except `GET
 | POST | `/v1/chat/completions` | OpenAI-style response using `nexus-council` or an allowlisted configured model |
 | POST | `/v1/council/completions` | Return stages 1–3 and ranking metadata |
 | POST | `/v1/council/completions/stream` | Stream Council stage events as SSE |
+| POST | `/v1/admin/keys` | Create a client key (requires `X-Nexus-Admin-Token` and PostgreSQL) |
+| DELETE | `/v1/admin/keys/{key_id}` | Revoke a database-backed client key |
+| GET | `/v1/usage/me?days=30` | Authenticated client's usage summary (PostgreSQL required) |
 | GET | `/api/conversations` | List only the authenticated client's conversations |
 | POST | `/api/conversations` | Create a conversation for the authenticated client |
 | GET | `/api/conversations/{id}` | Read only a conversation owned by the authenticated client |
@@ -82,6 +88,22 @@ The `/v1/chat/completions` endpoint currently supports `stream: false`. Use the 
 
 5. Set `CORS_ALLOWED_ORIGINS` to the exact origins allowed to access the API.
 
+### PostgreSQL and key administration
+
+Set `DATABASE_URL` to a PostgreSQL connection string and set `NEXUS_ADMIN_TOKEN` to a long, random server-side secret. At startup, the API applies the idempotent schema in `migrations/001_initial.sql` (it creates tables and indexes only; it does not drop existing tables). Then create a key using the admin endpoint:
+
+```http
+POST /v1/admin/keys
+X-Nexus-Admin-Token: YOUR_ADMIN_TOKEN
+Content-Type: application/json
+
+{"client_id":"integration-client","display_name":"Internal integration"}
+```
+
+The response contains the raw `api_key` exactly once. Save it securely; the database stores only its SHA-256 hash. Revoke it with `DELETE /v1/admin/keys/{key_id}` using the same admin header. Never expose the admin token to a browser or commit it to Git.
+
+Without `DATABASE_URL`, the application retains JSON storage and environment-configured key hashes for local development. Database-backed key administration and usage reporting return an unavailable response in that mode. Existing JSON conversations are not automatically imported into PostgreSQL; back them up and migrate them deliberately.
+
 For the frontend, copy `frontend/.env.example` to `frontend/.env.local` when you need a non-default API URL. The API key entered on the login screen is kept in `sessionStorage` for the current browser session. It is a client credential, not the OpenRouter master key.
 
 ## Local development
@@ -111,7 +133,7 @@ Run the security regression suite after installing project dependencies:
 uv run python -m unittest discover -s tests -v
 ```
 
-The tests cover missing/valid API keys, protection of legacy routes, conversation ownership, and conversation ID path traversal. The test suite has been added to the repository, but it must still be executed in a real Python environment before this branch is considered verified.
+The tests cover missing/valid API keys, protection of legacy routes, conversation ownership, and conversation ID path traversal. The test suite is run by the GitHub Actions workflow. PostgreSQL integration tests still require a dedicated test database and are not yet part of the default CI job.
 
 ## Security and production readiness
 
@@ -120,8 +142,10 @@ The tests cover missing/valid API keys, protection of legacy routes, conversatio
 - Existing conversation routes are authenticated as well as the new `/v1` routes.
 - CORS is not authentication and must be configured narrowly.
 - Existing JSON conversation files created before ownership metadata was added are not automatically assigned to a client; migrate them deliberately if they need to be retained.
-- JSON storage is not suitable for multi-instance production deployment. PostgreSQL-backed storage and migrations remain a required next phase.
-- Persistent key administration, rate limiting, usage quotas, concurrency controls, deployment checks, and full integration tests are not yet complete.
+- PostgreSQL-backed persistence, idempotent schema initialization, persistent key revocation, request audit records, and a per-client in-process rate limit are implemented.
+- The current rate limiter is process-local; multi-instance production must enforce shared limits at a gateway or with a shared store.
+- Usage summaries record API request counts, errors, and request latency; they are not billing-grade token accounting.
+- JSON files created before owner IDs were introduced are not automatically imported into PostgreSQL.
 - No deployment has been triggered by this work.
 
 ## Technology

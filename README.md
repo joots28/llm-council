@@ -23,7 +23,7 @@ A private, authenticated API around the original three-stage LLM Council. It kee
 - Automated security regression tests.
 - Optional PostgreSQL persistence for conversations, client keys, and request-usage audit.
 - Admin-only key creation/revocation endpoints; raw client keys are returned once.
-- Per-client in-process rolling rate limit and authenticated usage summary endpoint.
+- Per-client in-process rolling rate limit, daily request quotas, upstream concurrency cap, and authenticated usage summary endpoint.
 
 ## API endpoints
 
@@ -144,7 +144,8 @@ The tests cover missing/valid API keys, protection of legacy routes, conversatio
 - CORS is not authentication and must be configured narrowly.
 - Existing JSON conversation files created before ownership metadata was added are not automatically assigned to a client; migrate them deliberately if they need to be retained.
 - PostgreSQL-backed persistence, idempotent schema initialization, persistent key revocation, request audit records, and a per-client in-process rate limit are implemented.
-- The current rate limiter is process-local; multi-instance production must enforce shared limits at a gateway or with a shared store.
+- The rolling minute limiter and provider concurrency cap are process-local; multi-instance production must enforce shared limits at a gateway or with a shared store.
+- Daily quotas are reserved atomically in PostgreSQL when configured; without PostgreSQL they are process-local.
 - Usage summaries record API request counts, errors, and request latency; they are not billing-grade token accounting.
 - JSON files created before owner IDs were introduced are not automatically imported into PostgreSQL.
 - No deployment has been triggered by this work.

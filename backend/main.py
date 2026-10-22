@@ -122,11 +122,12 @@ def _validate_prompt(prompt: str) -> str:
 
 async def _get_owned_conversation(conversation_id: str, client_id: str):
     try:
-        return await repository.get_conversation(conversation_id, client_id)
-    except (ValueError, Exception) as exc:
-        # Invalid UUIDs and missing/foreign conversations are deliberately indistinguishable.
-        logger.debug("Conversation lookup did not succeed (%s)", type(exc).__name__)
+        uuid.UUID(conversation_id)
+    except (ValueError, TypeError, AttributeError):
         return None
+    # Missing/foreign conversations are deliberately indistinguishable. Database
+    # failures are not converted to 404, so operators can detect service outages.
+    return await repository.get_conversation(conversation_id, client_id)
 
 
 def _combine_messages(messages) -> str:

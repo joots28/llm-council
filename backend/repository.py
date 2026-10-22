@@ -233,3 +233,41 @@ async def list_client_keys(client_id: Optional[str] = None) -> List[Dict[str, An
         "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
         "active": row["revoked_at"] is None,
     } for row in rows]
+
+
+async def reserve_usage(client_id: str, key_id: Optional[str], method: str,
+                        route: str, daily_limit: int) -> Optional[int]:
+    """Atomically reserve a request slot and usage row; None means quota exhausted."""
+    if not database.enabled():
+        return 0
+    async with database.pool().acquire() as conn:
+        async with conn.transaction():
+            # Serialize quota checks per client so concurrent requests cannot all pass
+            # the same final available slot.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", client_id)
+            if daily_limit > 0:
+                used = await conn.fetchval(
+                    """SELECT COUNT(*) FROM nexus_usage_events
+                       WHERE client_id=$1 AND created_at >= date_trunc('day', NOW())""",
+                    client_id,
+                )
+                if used >= daily_limit:
+                    return None
+            row = await conn.fetchrow(
+                """INSERT INTO nexus_usage_events
+                   (client_id, api_key_id, method, route, status_code, duration_ms)
+                   VALUES($1, $2::uuid, $3, $4, 0, 0) RETURNING id""",
+                client_id, key_id, method, route,
+            )
+            return int(row["id"])
+
+
+async def complete_usage(event_id: int, status_code: int, duration_ms: int) -> None:
+    if not database.enabled() or event_id <= 0:
+        return
+    async with database.pool().acquire() as conn:
+        await conn.execute(
+            """UPDATE nexus_usage_events SET status_code=$2, duration_ms=$3
+               WHERE id=$1""",
+            event_id, status_code, max(0, duration_ms),
+        )

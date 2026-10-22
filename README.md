@@ -1,87 +1,133 @@
-# LLM Council
+# Nexus AI API — LLM Council
 
-![llmcouncil](header.jpg)
+A private, authenticated API around the original three-stage LLM Council. It keeps the existing React + Vite interface and FastAPI backend, while introducing a versioned API contract and a provider adapter for OpenRouter.
 
-The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.1, Google Gemini 3.0 Pro, Anthropic Claude Sonnet 4.5, xAI Grok 4, eg.c), you can group them into your "LLM Council". This repo is a simple, local web app that essentially looks like ChatGPT except it uses OpenRouter to send your query to multiple LLMs, it then asks them to review and rank each other's work, and finally a Chairman LLM produces the final response.
+> **Development status:** this branch is an implementation in progress. It has not been deployed. JSON conversation storage remains a local-development implementation; PostgreSQL migrations, persistent client administration, rate limiting/quotas, and a full deployment validation are still pending. Do not expose this branch to the public internet until those items are completed and tested.
 
-In a bit more detail, here is what happens when you submit a query:
+## How the Council works
 
-1. **Stage 1: First opinions**. The user query is given to all LLMs individually, and the responses are collected. The individual responses are shown in a "tab view", so that the user can inspect them all one by one.
-2. **Stage 2: Review**. Each individual LLM is given the responses of the other LLMs. Under the hood, the LLM identities are anonymized so that the LLM can't play favorites when judging their outputs. The LLM is asked to rank them in accuracy and insight.
-3. **Stage 3: Final response**. The designated Chairman of the LLM Council takes all of the model's responses and compiles them into a single final answer that is presented to the user.
+1. **Independent responses:** configured models answer the prompt.
+2. **Peer review:** responses are anonymized and ranked.
+3. **Final synthesis:** the chairman model produces the consolidated answer.
 
-## Vibe Code Alert
+## Current implementation
 
-This project was 99% vibe coded as a fun Saturday hack because I wanted to explore and evaluate a number of LLMs side by side in the process of [reading books together with LLMs](https://x.com/karpathy/status/1990577951671509438). It's nice and useful to see multiple responses side by side, and also the cross-opinions of all LLMs on each other's outputs. I'm not going to support it in any way, it's provided here as is for other people's inspiration and I don't intend to improve it. Code is ephemeral now and libraries are over, ask your LLM to change it in whatever way you like.
+- Private bearer-key authentication using SHA-256 hashes configured on the server.
+- Fail-closed behavior: protected routes return an error if client-key authentication is not configured.
+- Client-scoped conversation listing, reading, creation, and writing.
+- UUID validation and path-traversal protection for conversation files.
+- Versioned API endpoints and an OpenAI-style non-streaming Chat Completions response.
+- Dedicated Server-Sent Events (SSE) endpoint for Council stages.
+- Provider adapter boundary, with OpenRouter as the initial provider.
+- Frontend API base URL configuration, a session-only API-key entry screen, and an SSE frame parser that handles split network chunks.
+- Automated security regression tests.
 
-## Setup
+## API endpoints
 
-### 1. Install Dependencies
+All endpoints below require `Authorization: Bearer YOUR_CLIENT_KEY`, except `GET /` and `GET /health`, which expose only a minimal liveness response.
 
-The project uses [uv](https://docs.astral.sh/uv/) for project management.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/health` | Minimal health check |
+| GET | `/v1/models` | List the logical Council model and configured model allowlist |
+| POST | `/v1/chat/completions` | OpenAI-style response using `nexus-council` or an allowlisted configured model |
+| POST | `/v1/council/completions` | Return stages 1–3 and ranking metadata |
+| POST | `/v1/council/completions/stream` | Stream Council stage events as SSE |
+| GET | `/api/conversations` | List only the authenticated client's conversations |
+| POST | `/api/conversations` | Create a conversation for the authenticated client |
+| GET | `/api/conversations/{id}` | Read only a conversation owned by the authenticated client |
+| POST | `/api/conversations/{id}/message` | Run the Council and save the result |
+| POST | `/api/conversations/{id}/message/stream` | Run the Council with streamed stage events |
 
-**Backend:**
+### Chat Completions example
+
+```http
+POST /v1/chat/completions
+Authorization: Bearer YOUR_CLIENT_KEY
+Content-Type: application/json
+```
+
+```json
+{
+  "model": "nexus-council",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explain hexagonal architecture."
+    }
+  ],
+  "stream": false
+}
+```
+
+The `/v1/chat/completions` endpoint currently supports `stream: false`. Use the dedicated Council streaming endpoint to receive stage events progressively.
+
+## Configuration
+
+1. Copy the root `.env.example` to `.env`.
+2. Set `OPENROUTER_API_KEY` in the server environment.
+3. Generate a client key and its SHA-256 hash locally. For example:
+
+   ```bash
+   python -c "import secrets,hashlib; k=secrets.token_urlsafe(32); print('CLIENT_KEY='+k); print('SHA256='+hashlib.sha256(k.encode()).hexdigest())"
+   ```
+
+4. Save the generated raw `CLIENT_KEY` securely and configure only its hash on the server:
+
+   ```env
+   API_CLIENT_KEY_HASHES=your-client-id:PASTE_SHA256_HASH_HERE
+   ```
+
+   Multiple clients can be configured as comma-separated `client-id:hash` pairs. Never put a raw client key or the OpenRouter key into source control.
+
+5. Set `CORS_ALLOWED_ORIGINS` to the exact origins allowed to access the API.
+
+For the frontend, copy `frontend/.env.example` to `frontend/.env.local` when you need a non-default API URL. The API key entered on the login screen is kept in `sessionStorage` for the current browser session. It is a client credential, not the OpenRouter master key.
+
+## Local development
+
+Backend:
+
 ```bash
 uv sync
-```
-
-**Frontend:**
-```bash
-cd frontend
-npm install
-cd ..
-```
-
-### 2. Configure API Key
-
-Create a `.env` file in the project root:
-
-```bash
-OPENROUTER_API_KEY=sk-or-v1-...
-```
-
-Get your API key at [openrouter.ai](https://openrouter.ai/). Make sure to purchase the credits you need, or sign up for automatic top up.
-
-### 3. Configure Models (Optional)
-
-Edit `backend/config.py` to customize the council:
-
-```python
-COUNCIL_MODELS = [
-    "openai/gpt-5.1",
-    "google/gemini-3-pro-preview",
-    "anthropic/claude-sonnet-4.5",
-    "x-ai/grok-4",
-]
-
-CHAIRMAN_MODEL = "google/gemini-3-pro-preview"
-```
-
-## Running the Application
-
-**Option 1: Use the start script**
-```bash
-./start.sh
-```
-
-**Option 2: Run manually**
-
-Terminal 1 (Backend):
-```bash
 uv run python -m backend.main
 ```
 
-Terminal 2 (Frontend):
+Frontend, in another terminal:
+
 ```bash
 cd frontend
+npm install
 npm run dev
 ```
 
-Then open http://localhost:5173 in your browser.
+The Vite development server proxies `/api`, `/v1`, and `/health` to `http://127.0.0.1:8001`.
 
-## Tech Stack
+## Tests
 
-- **Backend:** FastAPI (Python 3.10+), async httpx, OpenRouter API
-- **Frontend:** React + Vite, react-markdown for rendering
-- **Storage:** JSON files in `data/conversations/`
-- **Package Management:** uv for Python, npm for JavaScript
+Run the security regression suite after installing project dependencies:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
+
+The tests cover missing/valid API keys, protection of legacy routes, conversation ownership, and conversation ID path traversal. The test suite has been added to the repository, but it must still be executed in a real Python environment before this branch is considered verified.
+
+## Security and production readiness
+
+- Raw client keys are not stored in the repository; server configuration contains their SHA-256 hashes.
+- The OpenRouter master key stays server-side.
+- Existing conversation routes are authenticated as well as the new `/v1` routes.
+- CORS is not authentication and must be configured narrowly.
+- Existing JSON conversation files created before ownership metadata was added are not automatically assigned to a client; migrate them deliberately if they need to be retained.
+- JSON storage is not suitable for multi-instance production deployment. PostgreSQL-backed storage and migrations remain a required next phase.
+- Persistent key administration, rate limiting, usage quotas, concurrency controls, deployment checks, and full integration tests are not yet complete.
+- No deployment has been triggered by this work.
+
+## Technology
+
+- Python 3.10+
+- FastAPI and Uvicorn
+- httpx
+- React and Vite
+- OpenRouter as the initial model provider

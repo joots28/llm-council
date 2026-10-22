@@ -48,6 +48,16 @@ class PostgresRepositoryTests(unittest.IsolatedAsyncioTestCase):
         items = await repository.list_conversations(self.client_id)
         self.assertTrue(any(item["id"] == conversation_id for item in items))
 
+    async def test_daily_quota_reservation_is_atomic(self):
+        first = await repository.reserve_usage(
+            self.client_id, self.key_id, "GET", "/quota-test", 1
+        )
+        second = await repository.reserve_usage(
+            self.client_id, self.key_id, "GET", "/quota-test", 1
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
     async def test_usage_summary_aggregates_events(self):
         await repository.record_usage(self.client_id, self.key_id, "GET", "/test", 200, 25)
         await repository.record_usage(self.client_id, self.key_id, "POST", "/test", 500, 75)

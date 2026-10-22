@@ -276,7 +276,7 @@ async def send_message_stream(
     request: SendMessageRequest,
     client: ApiClient = Depends(authenticate_api_key),
 ):
-    conversation = storage.get_conversation(conversation_id, client.client_id)
+    conversation = _get_owned_conversation(conversation_id, client.client_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     prompt = _validate_prompt(request.content)

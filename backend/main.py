@@ -286,6 +286,15 @@ async def create_api_key(request: CreateApiKeyRequest):
     return CreatedApiKey(key_id=key_id, client_id=request.client_id, api_key=raw_key)
 
 
+@app.get("/v1/admin/keys", dependencies=[Depends(require_admin_token)])
+async def list_api_keys(client_id: str | None = None):
+    """List key metadata for administration without exposing key material."""
+    try:
+        return {"data": await repository.list_client_keys(client_id)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Persistent key administration requires DATABASE_URL") from exc
+
+
 @app.delete("/v1/admin/keys/{key_id}", dependencies=[Depends(require_admin_token)])
 async def revoke_api_key(key_id: str):
     """Revoke a database-backed key immediately."""

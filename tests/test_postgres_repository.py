@@ -16,7 +16,7 @@ class PostgresRepositoryTests(unittest.IsolatedAsyncioTestCase):
         import hashlib
         self.digest = hashlib.sha256(self.raw_key.encode()).hexdigest()
         self.key_id = await repository.create_client_key(
-            self.client_id, "CI integration test", self.raw_key, self.digest
+            self.client_id, "CI integration test", self.digest
         )
 
     async def asyncTearDown(self):

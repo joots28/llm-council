@@ -1,4 +1,4 @@
-"""Regression tests for private API authentication and conversation isolation."""
+"""Regression tests for authentication, client isolation, limits, and local storage."""
 
 import hashlib
 import os
@@ -10,18 +10,25 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend import storage
+from backend.security import api_keys
 
 
 class PrivateApiSecurityTests(unittest.TestCase):
     def setUp(self):
+        api_keys._rate_buckets.clear()
         self.raw_key = "test-client-key-not-for-production"
         digest = hashlib.sha256(self.raw_key.encode("utf-8")).hexdigest()
-        self.env = patch.dict(os.environ, {"API_CLIENT_KEY_HASHES": f"test-client:{digest}"})
+        self.env = patch.dict(os.environ, {
+            "API_CLIENT_KEY_HASHES": f"test-client:{digest}",
+            "RATE_LIMIT_REQUESTS_PER_MINUTE": "60",
+        })
         self.env.start()
         self.client = TestClient(app)
 
     def tearDown(self):
+        self.client.close()
         self.env.stop()
+        api_keys._rate_buckets.clear()
 
     def test_private_models_endpoint_rejects_missing_key(self):
         response = self.client.get("/v1/models")
@@ -54,6 +61,22 @@ class PrivateApiSecurityTests(unittest.TestCase):
     def test_conversation_id_rejects_path_traversal(self):
         with self.assertRaises(ValueError):
             storage.get_conversation("../../.env", "test-client")
+
+    def test_admin_key_management_fails_closed_without_admin_secret(self):
+        with patch.dict(os.environ, {"NEXUS_ADMIN_TOKEN": ""}):
+            response = self.client.post(
+                "/v1/admin/keys",
+                json={"client_id": "test-client", "display_name": "Test"},
+            )
+        self.assertEqual(response.status_code, 503)
+
+    def test_per_client_rate_limit_returns_429(self):
+        with patch.dict(os.environ, {"RATE_LIMIT_REQUESTS_PER_MINUTE": "1"}):
+            headers = {"Authorization": f"Bearer {self.raw_key}"}
+            self.assertEqual(self.client.get("/v1/models", headers=headers).status_code, 200)
+            response = self.client.get("/v1/models", headers=headers)
+            self.assertEqual(response.status_code, 429)
+            self.assertEqual(response.headers.get("Retry-After"), "60")
 
 
 if __name__ == "__main__":

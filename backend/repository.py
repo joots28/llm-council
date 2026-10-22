@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -56,7 +55,7 @@ async def find_active_key(key_hash: str) -> Optional[Dict[str, str]]:
         return {"key_id": row["key_id"], "client_id": row["client_id"]}
 
 
-async def create_client_key(client_id: str, display_name: str, raw_key: str, key_hash: str) -> str:
+async def create_client_key(client_id: str, display_name: str, key_hash: str) -> str:
     if not database.enabled():
         raise RuntimeError("Persistent key administration requires DATABASE_URL")
     key_id = str(uuid.uuid4())

@@ -37,6 +37,7 @@ All endpoints below require `Authorization: Bearer YOUR_CLIENT_KEY`, except `GET
 | POST | `/v1/council/completions` | Return stages 1–3 and ranking metadata |
 | POST | `/v1/council/completions/stream` | Stream Council stage events as SSE |
 | POST | `/v1/admin/keys` | Create a client key (requires `X-Nexus-Admin-Token` and PostgreSQL) |
+| GET | `/v1/admin/keys` | List key metadata without secrets (optional `client_id` filter) |
 | DELETE | `/v1/admin/keys/{key_id}` | Revoke a database-backed client key |
 | GET | `/v1/usage/me?days=30` | Authenticated client's usage summary (PostgreSQL required) |
 | GET | `/api/conversations` | List only the authenticated client's conversations |

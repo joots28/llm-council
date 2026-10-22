@@ -59,6 +59,8 @@ async def query_models_parallel(
     )
     normalized: Dict[str, Optional[Dict[str, Any]]] = {}
     for model, response in zip(models, responses):
+        if isinstance(response, asyncio.CancelledError):
+            raise response
         if isinstance(response, BaseException):
             logger.warning("Provider task failed for model %s", model)
             normalized[model] = None

@@ -18,6 +18,7 @@ from .. import database, repository
 
 _bearer = HTTPBearer(auto_error=False)
 _rate_buckets = defaultdict(deque)
+_daily_buckets = defaultdict(deque)
 
 
 @dataclass(frozen=True)
@@ -94,8 +95,27 @@ async def authenticate_api_key(
         )
 
     _apply_rate_limit(client.client_id)
+    daily_limit = max(0, int(os.getenv("DAILY_REQUEST_QUOTA", "100")))
+    usage_event_id = 0
+    if database.enabled():
+        usage_event_id = await repository.reserve_usage(
+            client.client_id, client.key_id, request.method,
+            getattr(request.scope.get("route"), "path", request.url.path), daily_limit,
+        )
+        if usage_event_id is None:
+            raise HTTPException(status_code=429, detail="Daily request quota exceeded")
+    elif daily_limit:
+        now = time.time()
+        bucket = _daily_buckets[client.client_id]
+        while bucket and now - bucket[0] >= 86400:
+            bucket.popleft()
+        if len(bucket) >= daily_limit:
+            raise HTTPException(status_code=429, detail="Daily request quota exceeded")
+        bucket.append(now)
+
     request.state.client_id = client.client_id
     request.state.api_key_id = client.key_id
+    request.state.usage_event_id = usage_event_id
     return client
 
 

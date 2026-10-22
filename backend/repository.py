@@ -212,3 +212,24 @@ async def usage_summary(client_id: str, days: int = 30) -> Dict[str, Any]:
         )
     return {"client_id": client_id, "days": max(1, min(days, 90)),
             "requests": row["requests"], "errors": row["errors"], "duration_ms": row["duration_ms"]}
+
+async def list_client_keys(client_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List key metadata only; never return stored hashes or raw secrets."""
+    if not database.enabled():
+        raise RuntimeError("Persistent key administration requires DATABASE_URL")
+    async with database.pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT key_id::text AS key_id, client_id, created_at, revoked_at, last_used_at
+               FROM nexus_api_keys
+               WHERE ($1::text IS NULL OR client_id=$1)
+               ORDER BY created_at DESC LIMIT 500""",
+            client_id,
+        )
+    return [{
+        "key_id": row["key_id"],
+        "client_id": row["client_id"],
+        "created_at": row["created_at"].isoformat(),
+        "revoked_at": row["revoked_at"].isoformat() if row["revoked_at"] else None,
+        "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
+        "active": row["revoked_at"] is None,
+    } for row in rows]

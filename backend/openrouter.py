@@ -1,79 +1,67 @@
-"""OpenRouter API client for making LLM requests."""
+"""OpenRouter HTTP client. Provider-specific behavior stays behind the adapter."""
+
+import logging
+from typing import List, Dict, Any, Optional
 
 import httpx
-from typing import List, Dict, Any, Optional
+
 from .config import OPENROUTER_API_KEY, OPENROUTER_API_URL
+
+logger = logging.getLogger(__name__)
 
 
 async def query_model(
     model: str,
     messages: List[Dict[str, str]],
-    timeout: float = 120.0
+    timeout: float = 120.0,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Query a single model via OpenRouter API.
+    """Query one model; return None on provider failure without leaking details."""
+    if not OPENROUTER_API_KEY:
+        logger.error("OpenRouter is not configured; OPENROUTER_API_KEY is missing")
+        return None
 
-    Args:
-        model: OpenRouter model identifier (e.g., "openai/gpt-4o")
-        messages: List of message dicts with 'role' and 'content'
-        timeout: Request timeout in seconds
-
-    Returns:
-        Response dict with 'content' and optional 'reasoning_details', or None if failed
-    """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
-
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
+    payload = {"model": model, "messages": messages}
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                OPENROUTER_API_URL,
-                headers=headers,
-                json=payload
-            )
+            response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
             response.raise_for_status()
-
             data = response.json()
-            message = data['choices'][0]['message']
-
+            choices = data.get("choices") or []
+            if not choices or not isinstance(choices[0], dict):
+                logger.warning("Provider returned an empty completion for model %s", model)
+                return None
+            message = choices[0].get("message") or {}
             return {
-                'content': message.get('content'),
-                'reasoning_details': message.get('reasoning_details')
+                "content": message.get("content"),
+                "reasoning_details": message.get("reasoning_details"),
             }
-
-    except Exception as e:
-        print(f"Error querying model {model}: {e}")
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        # Avoid logging raw provider exceptions or payloads that could contain sensitive data.
+        logger.warning("OpenRouter request failed for model %s", model)
         return None
 
 
 async def query_models_parallel(
     models: List[str],
-    messages: List[Dict[str, str]]
+    messages: List[Dict[str, str]],
 ) -> Dict[str, Optional[Dict[str, Any]]]:
-    """
-    Query multiple models in parallel.
-
-    Args:
-        models: List of OpenRouter model identifiers
-        messages: List of message dicts to send to each model
-
-    Returns:
-        Dict mapping model identifier to response dict (or None if failed)
-    """
+    """Query the configured models concurrently."""
     import asyncio
 
-    # Create tasks for all models
-    tasks = [query_model(model, messages) for model in models]
-
-    # Wait for all to complete
-    responses = await asyncio.gather(*tasks)
-
-    # Map models to their responses
-    return {model: response for model, response in zip(models, responses)}
+    responses = await asyncio.gather(
+        *(query_model(model, messages) for model in models),
+        return_exceptions=True,
+    )
+    normalized: Dict[str, Optional[Dict[str, Any]]] = {}
+    for model, response in zip(models, responses):
+        if isinstance(response, BaseException):
+            logger.warning("Provider task failed for model %s", model)
+            normalized[model] = None
+        else:
+            normalized[model] = response
+    return normalized

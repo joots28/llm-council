@@ -6,13 +6,20 @@ import './App.css';
 
 function ApiKeyGate({ onSubmit }) {
   const [key, setKey] = useState('');
+  const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   return (
     <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (key.trim()) onSubmit(key.trim());
+          if (!key.trim()) return;
+          setError('');
+          setIsSubmitting(true);
+          Promise.resolve(onSubmit(key.trim()))
+            .catch((submitError) => setError(submitError.message || 'Não foi possível autenticar a chave.'))
+            .finally(() => setIsSubmitting(false));
         }}
         style={{
           width: 'min(100%, 460px)',
@@ -50,8 +57,9 @@ function ApiKeyGate({ onSubmit }) {
             color: 'inherit',
           }}
         />
-        <button type="submit" style={{ padding: '12px 16px', borderRadius: 8, cursor: 'pointer' }}>
-          Conectar
+        {error && <p role="alert" style={{ margin: 0, color: '#f87171' }}>{error}</p>}
+        <button type="submit" disabled={isSubmitting} style={{ padding: '12px 16px', borderRadius: 8, cursor: 'pointer' }}>
+          {isSubmitting ? 'Validando…' : 'Conectar'}
         </button>
         <small style={{ opacity: 0.68 }}>
           A chave fica apenas nesta sessão do navegador. Nunca use aqui a chave mestre do OpenRouter.
@@ -76,9 +84,15 @@ function App() {
     if (currentConversationId && apiKey) loadConversation(currentConversationId);
   }, [currentConversationId, apiKey]);
 
-  const handleApiKeySubmit = (key) => {
+  const handleApiKeySubmit = async (key) => {
     api.setApiKey(key);
-    setApiKey(key);
+    try {
+      await api.request('/v1/models');
+      setApiKey(key);
+    } catch (error) {
+      api.clearApiKey();
+      throw error;
+    }
   };
 
   const loadConversations = async () => {

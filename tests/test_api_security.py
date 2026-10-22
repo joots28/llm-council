@@ -22,6 +22,7 @@ class PrivateApiSecurityTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {
             "API_CLIENT_KEY_HASHES": f"test-client:{digest}",
             "RATE_LIMIT_REQUESTS_PER_MINUTE": "60",
+            "DAILY_REQUEST_QUOTA": "100",
         })
         self.env.start()
         self.client = TestClient(app)
@@ -62,6 +63,14 @@ class PrivateApiSecurityTests(unittest.TestCase):
     def test_conversation_id_rejects_path_traversal(self):
         with self.assertRaises(ValueError):
             storage.get_conversation("../../.env", "test-client")
+
+    def test_daily_quota_returns_429_when_exhausted(self):
+        with patch.dict(os.environ, {"DAILY_REQUEST_QUOTA": "1"}):
+            headers = {"Authorization": f"Bearer {self.raw_key}"}
+            self.assertEqual(self.client.get("/v1/models", headers=headers).status_code, 200)
+            response = self.client.get("/v1/models", headers=headers)
+            self.assertEqual(response.status_code, 429)
+            self.assertIn("Daily request quota", response.json()["detail"])
 
     def test_admin_key_management_fails_closed_without_admin_secret(self):
         with patch.dict(os.environ, {"NEXUS_ADMIN_TOKEN": ""}):
